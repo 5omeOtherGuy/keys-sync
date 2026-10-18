@@ -92,9 +92,9 @@ bash tools/secret-scan.sh .
 
 Tests use a temporary HOME and XDG_CONFIG_HOME and a fake p1. Real-p1 sandbox
 tests skip unless `KEYS_SYNC_TEST_P1_BIN` points to a locally installed binary.
-To install the optional pre-push scan hook in this worktree:
+To run the gate and a secret scan of the outgoing commits before every push,
+enable the repository's hooks once per checkout:
 
 ```sh
-cp tools/hooks/pre-push "$(git rev-parse --git-path hooks)/pre-push"
-chmod +x "$(git rev-parse --git-path hooks)/pre-push"
+git config core.hooksPath .githooks
 ```
