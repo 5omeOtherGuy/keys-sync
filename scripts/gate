@@ -12,8 +12,11 @@ trap 'rm -rf "$GATE_TMP"' EXIT
 export HOME="$GATE_TMP/home" XDG_CONFIG_HOME="$GATE_TMP/config" XDG_CACHE_HOME="$GATE_TMP/cache" \
   XDG_DATA_HOME="$GATE_TMP/data" XDG_STATE_HOME="$GATE_TMP/state"
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null PYTHONDONTWRITEBYTECODE=1
-unset KEYS_SYNC_TEST_P1_BIN
-mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+# Inherited repository or index selection must not change what counts as tracked.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CEILING_DIRECTORIES KEYS_SYNC_TEST_P1_BIN
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" \
+  || { echo "gate: FAILED: cannot create the temporary HOME and XDG directories" >&2; exit 2; }
 fail=0
 step() { # label command...
   local label=$1 out; shift
@@ -25,7 +28,10 @@ step() { # label command...
 
 # Tracked files, NUL-delimited so no name is quoted or split.
 git ls-files -z > "$GATE_TMP/files" || { echo "gate: FAILED: git ls-files" >&2; exit 2; }
-: > "$GATE_TMP/python"
+[ -s "$GATE_TMP/files" ] || { echo "gate: FAILED: git ls-files listed no tracked files" >&2; exit 2; }
+: > "$GATE_TMP/python" || { echo "gate: FAILED: cannot write $GATE_TMP/python" >&2; exit 2; }
+# A Bash script is any tracked file whose shebang runs bash directly or through env.
+bash_shebang='^#![[:space:]]*/([^[:space:]]*/)?(bash|env([[:space:]]+-[^[:space:]]+)*[[:space:]]+bash)([[:space:]]|$)'
 while IFS= read -r -d '' f; do
   if [ ! -f "$f" ]; then
     printf 'gate: FAILED: tracked file missing from the working tree: %s\n' "$f" >&2; fail=1; continue
@@ -35,11 +41,12 @@ while IFS= read -r -d '' f; do
   fi
   first=
   IFS= read -r first < "$f" || true   # empty or newline-less files are fine
-  case $first in
-    '#!/usr/bin/env bash'*|'#!/bin/bash'*) step "bash -n $f" bash -n "$f";;
-  esac
+  if [[ $first =~ $bash_shebang ]]; then
+    step "bash -n $f" bash -n "$f"
+  fi
   case $f in
-    *.py) printf '%s\0' "$f" >> "$GATE_TMP/python";;
+    *.py) printf '%s\0' "$f" >> "$GATE_TMP/python" \
+      || { echo "gate: FAILED: cannot write $GATE_TMP/python" >&2; exit 2; };;
   esac
 done < "$GATE_TMP/files"
 # Compile every tracked Python file without writing bytecode.
