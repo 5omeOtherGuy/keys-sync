@@ -1,8 +1,30 @@
 # keys-sync
 
-`keys-sync` copies local API-key files into JSON credential stores for tools you
-configure. It has built-in defaults for pi and opencode and optional support for
-p1 routes. It does not print key values.
+Copies API keys from local key files into the credential stores of your agent CLIs.
+
+Status: pre-release. Others may try it, but nothing is promised yet: configuration, commands and output can change without notice.
+
+[![gate](https://github.com/5omeOtherGuy/keys-sync/actions/workflows/gate.yml/badge.svg?branch=main)](https://github.com/5omeOtherGuy/keys-sync/actions/workflows/gate.yml)
+[![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
+
+## What it does
+
+You keep each API key in one file in a key directory. `keys-sync` copies
+those keys into the JSON credential stores of the tools you configure, so
+rotating a key means editing one file and running one command. It has
+built-in defaults for pi and opencode and optional support for p1 routes.
+It never prints key values.
+
+### Limits and safety
+
+Only API keys are handled; OAuth credentials are not synced. JSON stores must
+be top-level objects containing entries that are objects; pointers traverse
+object keys, not arrays. pi `models.json` `!cat` file references are checked
+for existence. `--check` is read-only; `--dry-run` does not write. Sync writes
+JSON stores atomically with mode 600 and creates no backup copies (backups made
+by older versions are not removed); it does not encrypt keys. Protect the source
+directory, and inspect your target tool's store format before use. A missing
+p1 route is reported `no-route`, not created.
 
 ## Install
 
@@ -11,7 +33,7 @@ routes. Clone the repository, then run `python3 keys_sync.py --help` from it.
 To run it from elsewhere, use the absolute path to `keys_sync.py` or put the
 script on your `PATH`. No pip packages are required.
 
-## Example
+## Usage
 
 Set `XDG_CONFIG_HOME` to your configuration directory (defaults to
 `$HOME/.config`). Create `$XDG_CONFIG_HOME/keys` with mode 700, put your
@@ -72,29 +94,48 @@ directly.
 JSON entry into `<keys_dir>/copied.key` (or use `p1-STORE:ROUTE` for p1).
 Imports refuse to overwrite a different key.
 
-## Limits and safety
+## Compatibility
 
-Only API keys are handled; OAuth credentials are not synced. JSON stores must
-be top-level objects containing entries that are objects; pointers traverse
-object keys, not arrays. pi `models.json` `!cat` file references are checked
-for existence. `--check` is read-only; `--dry-run` does not write. Sync writes
-JSON stores atomically with mode 600 and creates no backup copies (backups made
-by older versions are not removed); it does not encrypt keys. Protect the source
-directory, and inspect your target tool's store format before use. A missing
-p1 route is reported `no-route`, not created.
+- Python 3.11 or newer, standard library only. The gate runs on Python 3.11
+  on Ubuntu 24.04 (last verified 2026-10-18).
+- Linux. Other POSIX systems are untested. The tool relies on POSIX file
+  modes (600 for stores and key files), so Windows is not supported.
 
-## Tests and local scan
+## Development
+
+Run the gate before every change; CI runs the same command:
 
 ```sh
-python3 -m unittest discover -s tests -v
-bash tools/secret-scan.sh .
+scripts/gate
 ```
 
-Tests use a temporary HOME and XDG_CONFIG_HOME and a fake p1. Real-p1 sandbox
-tests skip unless `KEYS_SYNC_TEST_P1_BIN` points to a locally installed binary.
+It syntax-checks the Bash scripts and Python files, runs the unit tests and
+scans the repository for secrets, in a temporary `HOME` and
+`XDG_CONFIG_HOME`. Run one test with:
+
+```sh
+python3 -m unittest tests.test_keys_sync.SandboxTest.test_check_and_dry_run_are_read_only -v
+```
+
+Tests use a fake p1. Real-p1 sandbox tests skip unless
+`KEYS_SYNC_TEST_P1_BIN` points to a locally installed binary; the gate
+always skips them.
+
 To run the gate and a secret scan of the outgoing commits before every push,
 enable the repository's hooks once per checkout:
 
 ```sh
 git config core.hooksPath .githooks
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to propose changes.
+
+## Contributing, support and security
+
+- Bugs and feature requests: [issues](https://github.com/5omeOtherGuy/keys-sync/issues).
+- Contributions: [CONTRIBUTING.md](CONTRIBUTING.md).
+- Vulnerabilities: report privately as described in [SECURITY.md](SECURITY.md).
+
+## Licence
+
+[MIT](LICENSE).
