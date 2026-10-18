@@ -1,0 +1,42 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste a real key, key file or credential store. Replace key values with placeholders before you paste configuration or output.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag, or the commit you use (`git rev-parse --short HEAD`).
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, `python3 --version`, and the target tools and their versions (for example pi, opencode or p1).
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include your `sync.toml` with key values and personal paths replaced.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Include the exit status and output.
+    validations:
+      required: true
