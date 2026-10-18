@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # keys-sync uses only the Python standard library, so GitHub Actions is the
+  # only ecosystem with dependencies.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 5
+    groups:
+      github-actions:
+        update-types: [minor, patch]
+    labels: [dependencies]

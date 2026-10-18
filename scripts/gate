@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# scripts/gate: everything a change must pass. CI runs exactly this command.
+# Syntax-checks every tracked Bash script and Python file, runs the unit tests
+# and scans the repository for secrets. Quiet on success ("gate: ok"); prints
+# only the failing step's output on failure. Hermetic: no network, no
+# credentials, temporary HOME and XDG directories, no user or system Git
+# configuration, and the opt-in real-p1 tests (KEYS_SYNC_TEST_P1_BIN) are off.
+set -u
+CDPATH= cd -- "$(dirname -- "$0")/.." || exit 2
+GATE_TMP=$(mktemp -d) || exit 2
+trap 'rm -rf "$GATE_TMP"' EXIT
+export HOME="$GATE_TMP/home" XDG_CONFIG_HOME="$GATE_TMP/config" XDG_CACHE_HOME="$GATE_TMP/cache" \
+  XDG_DATA_HOME="$GATE_TMP/data" XDG_STATE_HOME="$GATE_TMP/state"
+export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null PYTHONDONTWRITEBYTECODE=1
+# Inherited repository or index selection must not change what counts as tracked.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
+  GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_CEILING_DIRECTORIES KEYS_SYNC_TEST_P1_BIN
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" \
+  || { echo "gate: FAILED: cannot create the temporary HOME and XDG directories" >&2; exit 2; }
+fail=0
+step() { # label command...
+  local label=$1 out; shift
+  if ! out=$("$@" 2>&1); then
+    printf 'gate: FAILED: %s\n%s\n' "$label" "$out" >&2
+    fail=1
+  fi
+}
+
+# Tracked files, NUL-delimited so no name is quoted or split.
+git ls-files -z > "$GATE_TMP/files" || { echo "gate: FAILED: git ls-files" >&2; exit 2; }
+[ -s "$GATE_TMP/files" ] || { echo "gate: FAILED: git ls-files listed no tracked files" >&2; exit 2; }
+: > "$GATE_TMP/python" || { echo "gate: FAILED: cannot write $GATE_TMP/python" >&2; exit 2; }
+# A Bash script is any tracked file whose shebang line names bash as a word or
+# a path ending in /bash (/bin/bash, /usr/bin/env -S -u X /bin/bash, ...).
+is_bash_shebang() { # first-line
+  local word words
+  [[ $1 == '#!'* ]] || return 1
+  read -r -a words <<< "${1#??}"   # split on whitespace, no globbing
+  for word in "${words[@]}"; do
+    case $word in bash|*/bash) return 0;; esac
+  done
+  return 1
+}
+while IFS= read -r -d '' f; do
+  if [ ! -f "$f" ]; then
+    printf 'gate: FAILED: tracked file missing from the working tree: %s\n' "$f" >&2; fail=1; continue
+  fi
+  if [ ! -r "$f" ]; then
+    printf 'gate: FAILED: cannot read %s\n' "$f" >&2; fail=1; continue
+  fi
+  first=
+  IFS= read -r first < "$f" || true   # empty or newline-less files are fine
+  if is_bash_shebang "$first"; then
+    step "bash -n $f" bash -n "$f"
+  fi
+  case $f in
+    *.py) printf '%s\0' "$f" >> "$GATE_TMP/python" \
+      || { echo "gate: FAILED: cannot write $GATE_TMP/python" >&2; exit 2; };;
+  esac
+done < "$GATE_TMP/files"
+# Compile every tracked Python file without writing bytecode.
+step 'python syntax' python3 -c '
+import sys
+paths = open(sys.argv[1], "rb").read().split(b"\0")[:-1]
+for p in paths:
+    compile(open(p, "rb").read(), p.decode(errors="replace"), "exec")
+' "$GATE_TMP/python"
+step 'tests (python3 -m unittest discover -s tests)' python3 -m unittest discover -s tests
+step 'secret scan (tools/secret-scan.sh)' bash tools/secret-scan.sh .
+
+[ $fail -eq 0 ] && echo "gate: ok"
+exit $fail
