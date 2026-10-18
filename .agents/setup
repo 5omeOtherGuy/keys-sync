@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Orb setup for keys-sync. Idempotent and non-interactive.
+# The tool and its gate need only Python 3.11 or newer (standard library),
+# bash, GNU grep and git.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+missing=()
+for pkg in bash grep git python3; do
+  command -v "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+done
+if [ ${#missing[@]} -gt 0 ]; then
+  echo "setup: installing ${missing[*]}"
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq "${missing[@]}"
+fi
+python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
+  || { echo "setup: python3 is $(python3 -V 2>&1); keys-sync needs 3.11 or newer" >&2; exit 1; }
+
+git config core.hooksPath .githooks
+echo "setup: core.hooksPath=.githooks (pre-push runs scripts/gate)"
+
+# Report which credentials are present without printing them. None are needed
+# for the gate; gh uses GH_TOKEN or GITHUB_TOKEN for PR work.
+for v in GH_TOKEN GITHUB_TOKEN; do
+  if [ -n "${!v:-}" ]; then echo "setup: $v is set"; else echo "setup: $v is not set"; fi
+done

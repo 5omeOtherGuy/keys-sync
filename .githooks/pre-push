@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Development pre-push hook for this repository. Enable once per checkout:
+#   git config core.hooksPath .githooks
+# Runs the gate on the working tree, then the secret scan of the outgoing
+# commits (tools/hooks/pre-push). Any failure refuses the push.
+set -u
+set -o pipefail
+root=$(git rev-parse --show-toplevel) || exit 1
+# git's ref lines on stdin, saved for tools/hooks/pre-push
+refs=$(cat) || { echo "pre-push: cannot read the pushed refs; push refused" >&2; exit 1; }
+"$root/scripts/gate" < /dev/null || { echo "pre-push: gate failed; push refused" >&2; exit 1; }
+printf '%s\n' "$refs" | "$root/tools/hooks/pre-push" "$@"

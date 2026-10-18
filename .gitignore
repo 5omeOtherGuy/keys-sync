@@ -1,1 +1,22 @@
+# Python bytecode
 __pycache__/
+
+# Environment files (keep the example)
+.env*
+!.env.example
+
+# Local agent scratch and orb portals
+.amp/in/
+.amp/portals/
+
+# Build output and temporary files
+/build/
+/dist/
+*.tmp
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
