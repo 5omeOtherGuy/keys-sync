@@ -6,7 +6,7 @@
 # credentials, temporary HOME and XDG directories, no user or system Git
 # configuration, and the opt-in real-p1 tests (KEYS_SYNC_TEST_P1_BIN) are off.
 set -u
-cd "$(dirname "$0")/.." || exit 2
+CDPATH= cd -- "$(dirname -- "$0")/.." || exit 2
 GATE_TMP=$(mktemp -d) || exit 2
 trap 'rm -rf "$GATE_TMP"' EXIT
 export HOME="$GATE_TMP/home" XDG_CONFIG_HOME="$GATE_TMP/config" XDG_CACHE_HOME="$GATE_TMP/cache" \
@@ -30,8 +30,17 @@ step() { # label command...
 git ls-files -z > "$GATE_TMP/files" || { echo "gate: FAILED: git ls-files" >&2; exit 2; }
 [ -s "$GATE_TMP/files" ] || { echo "gate: FAILED: git ls-files listed no tracked files" >&2; exit 2; }
 : > "$GATE_TMP/python" || { echo "gate: FAILED: cannot write $GATE_TMP/python" >&2; exit 2; }
-# A Bash script is any tracked file whose shebang runs bash directly or through env.
-bash_shebang='^#![[:space:]]*/([^[:space:]]*/)?(bash|env([[:space:]]+-[^[:space:]]+)*[[:space:]]+bash)([[:space:]]|$)'
+# A Bash script is any tracked file whose shebang line names bash as a word or
+# a path ending in /bash (/bin/bash, /usr/bin/env -S -u X /bin/bash, ...).
+is_bash_shebang() { # first-line
+  local word words
+  [[ $1 == '#!'* ]] || return 1
+  read -r -a words <<< "${1#??}"   # split on whitespace, no globbing
+  for word in "${words[@]}"; do
+    case $word in bash|*/bash) return 0;; esac
+  done
+  return 1
+}
 while IFS= read -r -d '' f; do
   if [ ! -f "$f" ]; then
     printf 'gate: FAILED: tracked file missing from the working tree: %s\n' "$f" >&2; fail=1; continue
@@ -41,7 +50,7 @@ while IFS= read -r -d '' f; do
   fi
   first=
   IFS= read -r first < "$f" || true   # empty or newline-less files are fine
-  if [[ $first =~ $bash_shebang ]]; then
+  if is_bash_shebang "$first"; then
     step "bash -n $f" bash -n "$f"
   fi
   case $f in
