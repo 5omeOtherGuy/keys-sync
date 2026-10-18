@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""keys-sync — copy API keys from local files into configured credential stores.
+"""keys-sync — push API keys from the canonical key store into every tool's credential store.
 
-Canonical store: ``$XDG_CONFIG_HOME/keys/<name>.key`` (one key per file, mode 600),
-mapping ``$XDG_CONFIG_HOME/keys/sync.toml``. JSON targets are configurable; pi and
-opencode have built-in defaults. Optional p1 routes use `p1 login` (key on stdin).
+Canonical store: ``~/.agents/keys/<name>.key`` (one key per file, mode 600, directory 700),
+register ``~/.agents/keys/KEYS.md``, mapping ``~/.agents/keys/sync.toml``.
+
+Targets per key (all optional):
+  pi       entries in ~/.pi/agent/auth.json            {"type": "api_key", "key": ...}
+  opencode entries in ~/.local/share/opencode/auth.json {"type": "api", "key": ...}
+  p1       routes in every configured p1 store, written with `p1 login <route>` (key on stdin)
 
 Commands:
   keys-sync --check            report ok / STALE / MISSING / no-route per target; exit 1 if anything is stale
-  keys-sync [--dry-run]        make every target match its key file (backs up each store it changes)
-  keys-sync import SRC NAME    copy one existing store entry into the keys directory
-                               SRC = STORE:ENTRY | p1-<store>:ROUTE
+  keys-sync [--dry-run]        make every target match its key file (atomic writes, no backup copies)
+  keys-sync import SRC NAME    copy one existing store entry into ~/.agents/keys/NAME.key
+                               SRC = pi:ENTRY | opencode:ENTRY | p1-<store>:ROUTE
 
 Never prints, logs or passes a key value on a command line. Paths starting with ``~`` resolve
 against $HOME, so a test run with HOME=<tmp> cannot reach the real stores. OAuth grants
@@ -21,11 +25,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,10 +51,6 @@ def expand(path: str) -> Path:
     return Path(path)
 
 
-def config_home() -> Path:
-    return Path(os.environ["XDG_CONFIG_HOME"]) if os.environ.get("XDG_CONFIG_HOME") else home() / ".config"
-
-
 def read_key(path: Path) -> str:
     return path.read_text().strip()
 
@@ -73,7 +71,8 @@ class P1Store:
 @dataclass
 class KeySpec:
     name: str
-    targets: dict[str, list[str]] = field(default_factory=dict)
+    pi: list[str] = field(default_factory=list)
+    opencode: list[str] = field(default_factory=list)
     p1: list[str] = field(default_factory=list)  # "ROUTE" or "ROUTE@DIRNAME" ([p1.config_dirs])
     p1_config_dir: Path | None = None  # P1_CONFIG_DIR for this key's plain "ROUTE" entries
 
@@ -93,7 +92,7 @@ class Config:
     p1_bin: Path | None
     p1_stores: list[P1Store]
     keys: list[KeySpec]
-    json_stores: dict[str, tuple[Path, str, tuple[str, ...]]]
+    json_paths: dict[str, Path]
     p1_config_dirs: dict[str, Path] = field(default_factory=dict)
 
     def key_file(self, spec: KeySpec) -> Path:
@@ -102,62 +101,44 @@ class Config:
 
 def load_config(path: Path) -> Config:
     raw = tomllib.loads(path.read_text())
-    keys_dir = expand(raw["keys_dir"]) if "keys_dir" in raw else config_home() / "keys"
+    keys_dir = expand(raw.get("keys_dir", "~/.agents/keys"))
     p1 = raw.get("p1", {})
     p1_bin = expand(p1["bin"]) if "bin" in p1 else None
     stores = []
     for store in p1.get("stores", [{"name": "default"}]):
-        store_home = expand(store["xdg_config_home"]) if "xdg_config_home" in store else config_home()
-        stores.append(P1Store(store["name"], store_home))
+        config_home = expand(store["xdg_config_home"]) if "xdg_config_home" in store else home() / ".config"
+        stores.append(P1Store(store["name"], config_home))
     config_dirs = {name: expand(value) for name, value in p1.get("config_dirs", {}).items()}
-    json_stores = {name: (expand(default), kind, ("key",)) for name, (default, kind) in JSON_STORES.items()}
+    json_paths = {name: expand(default) for name, (default, _) in JSON_STORES.items()}
     for name, value in raw.get("stores", {}).items():
-        if name not in json_stores:
+        if name not in JSON_STORES:
             raise SystemExit(f"keys-sync: unknown store '{name}' in {path}")
-        _, kind, pointer = json_stores[name]
-        json_stores[name] = (expand(value), kind, pointer)
-    for name, store in raw.get("json_stores", {}).items():
-        if not isinstance(store, dict) or "path" not in store:
-            raise SystemExit(f"keys-sync: json_stores.{name} needs a path")
-        pointer = store.get("pointer", "/key")
-        if not isinstance(pointer, str) or not pointer.startswith("/") or pointer == "/":
-            raise SystemExit(f"keys-sync: json_stores.{name} needs a JSON pointer to a field")
-        parts = pointer[1:].split("/")
-        if any(not part or "~" in part.replace("~0", "").replace("~1", "") for part in parts):
-            raise SystemExit(f"keys-sync: invalid pointer for json_stores.{name}")
-        json_stores[name] = (expand(store["path"]), store.get("type", "api_key"),
-                             tuple(part.replace("~1", "/").replace("~0", "~") for part in parts))
+        json_paths[name] = expand(value)
     keys, seen = [], set()
     for entry in raw.get("key", []):
-        unknown = set(entry) - {"name", "pi", "opencode", "targets", "p1", "p1_config_dir", "note"}
+        unknown = set(entry) - {"name", "pi", "opencode", "p1", "p1_config_dir", "note"}
         if unknown:
             raise SystemExit(f"keys-sync: key '{entry.get('name')}' has unknown fields {sorted(unknown)}")
         if entry["name"] in seen:
             raise SystemExit(f"keys-sync: key '{entry['name']}' is listed twice")
         seen.add(entry["name"])
-        targets = {name: list(entries) for name, entries in entry.get("targets", {}).items()}
-        for name in ("pi", "opencode"):
-            if name in entry:
-                targets.setdefault(name, []).extend(entry[name])
-        for name in targets:
-            if name not in json_stores:
-                raise SystemExit(f"keys-sync: key '{entry['name']}': unknown JSON store '{name}'")
         keys.append(
             KeySpec(
                 name=entry["name"],
-                targets=targets,
+                pi=list(entry.get("pi", [])),
+                opencode=list(entry.get("opencode", [])),
                 p1=list(entry.get("p1", [])),
                 p1_config_dir=expand(entry["p1_config_dir"]) if "p1_config_dir" in entry else None,
             )
         )
-    for store in json_stores:
+    for store in ("pi", "opencode"):
         owners: dict[str, str] = {}
         for spec in keys:
-            for entry in spec.targets.get(store, []):
+            for entry in getattr(spec, store):
                 if entry in owners:
                     raise SystemExit(f"keys-sync: {store}:{entry} is mapped by both '{owners[entry]}' and '{spec.name}'")
                 owners[entry] = spec.name
-    cfg = Config(keys_dir, p1_bin, stores, keys, json_stores, config_dirs)
+    cfg = Config(keys_dir, p1_bin, stores, keys, json_paths, config_dirs)
     for spec in keys:
         spec.p1_targets(config_dirs)  # validates every @DIRNAME now
     return cfg
@@ -185,24 +166,6 @@ def write_json_atomic(path: Path, data: dict) -> None:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
-
-
-class Backups:
-    """Back up each store file once per run, before its first change."""
-
-    def __init__(self, dry_run: bool):
-        self.stamp = time.strftime("%Y%m%d-%H%M%S")
-        self.done: set[Path] = set()
-        self.dry_run = dry_run
-
-    def before_change(self, path: Path) -> None:
-        if path in self.done or self.dry_run or not path.exists():
-            self.done.add(path)
-            return
-        backup = path.with_name(f"{path.name}.bak-{self.stamp}")
-        shutil.copy2(path, backup)
-        os.chmod(backup, 0o600)
-        self.done.add(path)
 
 
 def p1_env(store: P1Store, config_dir: Path | None) -> dict:
@@ -245,45 +208,30 @@ class Row:
     status: str  # ok | STALE | MISSING | NO-KEYFILE | no-route | fixed | would-fix | FAILED
 
 
-def entry_value(store: dict, entry: str, pointer: tuple[str, ...] = ("key",)) -> str | None:
+def entry_value(store: dict, entry: str) -> str | None:
     value = store.get(entry)
-    for part in pointer:
-        if not isinstance(value, dict):
-            return None
-        value = value.get(part)
-    return value.strip() if isinstance(value, str) else None
-
-
-def set_entry(store: dict, entry: str, pointer: tuple[str, ...], kind: str, value: str) -> None:
-    if not isinstance(store.get(entry), dict):
-        store[entry] = {"type": kind}
-    record = store[entry]
-    for part in pointer[:-1]:
-        if not isinstance(record.get(part), dict):
-            record[part] = {}
-        record = record[part]
-    record[pointer[-1]] = value
+    if isinstance(value, dict) and isinstance(value.get("key"), str):
+        return value["key"].strip()
+    return None
 
 
 def run(cfg: Config, mode: str) -> list[Row]:
     """mode: 'check' | 'dry-run' | 'sync'."""
     rows: list[Row] = []
-    backups = Backups(dry_run=(mode != "sync"))
-    json_data = {name: load_json(path) for name, (path, _, _) in cfg.json_stores.items()}
+    json_data = {name: load_json(path) for name, path in cfg.json_paths.items()}
     json_dirty: set[str] = set()
 
     for spec in cfg.keys:
         key_path = cfg.key_file(spec)
         value = read_key(key_path) if key_path.exists() else None
 
-        for store, entries in spec.targets.items():
-            _, kind, pointer = cfg.json_stores[store]
-            for entry in entries:
+        for store in ("pi", "opencode"):
+            for entry in getattr(spec, store):
                 target = f"{store}:{entry}"
                 if value is None:
                     rows.append(Row(spec.name, target, "NO-KEYFILE"))
                     continue
-                current = entry_value(json_data[store], entry, pointer)
+                current = entry_value(json_data[store], entry)
                 if current == value:
                     rows.append(Row(spec.name, target, "ok"))
                     continue
@@ -293,7 +241,11 @@ def run(cfg: Config, mode: str) -> list[Row]:
                     continue
                 rows.append(Row(spec.name, target, f"would-fix ({status.lower()})" if mode == "dry-run" else "fixed"))
                 if mode == "sync":
-                    set_entry(json_data[store], entry, pointer, kind, value)
+                    record = json_data[store].get(entry)
+                    if isinstance(record, dict):
+                        record["key"] = value  # keep its type and any other fields
+                    else:
+                        json_data[store][entry] = {"type": JSON_STORES[store][1], "key": value}
                     json_dirty.add(store)
 
         for route, config_dir in spec.p1_targets(cfg.p1_config_dirs):
@@ -315,7 +267,6 @@ def run(cfg: Config, mode: str) -> list[Row]:
                 elif mode == "dry-run":
                     rows.append(Row(spec.name, target, f"would-fix ({status.lower()})"))
                 else:
-                    backups.before_change(store.auth_path)
                     result = subprocess.run(
                         [str(cfg.p1_bin), "login", route],
                         input=value + "\n",
@@ -328,19 +279,18 @@ def run(cfg: Config, mode: str) -> list[Row]:
                     rows.append(Row(spec.name, target, "fixed" if ok else "FAILED"))
 
     for store in sorted(json_dirty):
-        backups.before_change(cfg.json_stores[store][0])
-        write_json_atomic(cfg.json_stores[store][0], json_data[store])
+        write_json_atomic(cfg.json_paths[store], json_data[store])
     return rows
 
 
 def unmanaged(cfg: Config) -> list[str]:
     """API-key entries that no key in sync.toml maps (OAuth grants are not API keys and are skipped)."""
-    mapped = {(s, e) for spec in cfg.keys for s, entries in spec.targets.items() for e in entries}
+    mapped = {(s, e) for spec in cfg.keys for s in ("pi", "opencode") for e in getattr(spec, s)}
     routes = {r for spec in cfg.keys for r, _ in spec.p1_targets(cfg.p1_config_dirs)}
     out = []
-    for store, (path, _, pointer) in cfg.json_stores.items():
+    for store, path in cfg.json_paths.items():
         for entry, record in load_json(path).items():
-            if entry_value({entry: record}, entry, pointer) is not None and (store, entry) not in mapped:
+            if isinstance(record, dict) and "key" in record and (store, entry) not in mapped:
                 out.append(f"{store}:{entry}")
     for store in cfg.p1_stores:
         for route, record in load_json(store.auth_path).items():
@@ -368,16 +318,15 @@ def import_entry(cfg: Config, source: str, name: str) -> str:
     if "/" in name or not name or name.startswith("."):
         raise SystemExit("keys-sync: NAME must be a plain file stem")
     store, _, entry = source.partition(":")
-    if store in cfg.json_stores:
-        path, _, pointer = cfg.json_stores[store]
-        value = entry_value(load_json(path), entry, pointer)
+    if store in cfg.json_paths:
+        value = entry_value(load_json(cfg.json_paths[store]), entry)
     elif store.startswith("p1-"):
         matches = [s for s in cfg.p1_stores if s.name == store[3:]]
         if not matches:
             raise SystemExit(f"keys-sync: unknown p1 store '{store[3:]}'")
         value = entry_value(load_json(matches[0].auth_path), entry)
     else:
-        raise SystemExit("keys-sync: SRC must be STORE:ENTRY or p1-<store>:ROUTE")
+        raise SystemExit("keys-sync: SRC must be pi:ENTRY, opencode:ENTRY or p1-<store>:ROUTE")
     if value is None:
         raise SystemExit(f"keys-sync: {source} holds no API key")
     cfg.keys_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -398,13 +347,13 @@ def import_entry(cfg: Config, source: str, name: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="keys-sync", description=__doc__.split("\n\n")[0])
-    parser.add_argument("--config", help="TOML mapping (default: $XDG_CONFIG_HOME/keys/sync.toml)")
+    parser.add_argument("--config", default="~/.agents/keys/sync.toml")
     parser.add_argument("--check", action="store_true", help="report only; exit 1 if any target is stale")
     parser.add_argument("--dry-run", action="store_true", help="show what a sync would change")
     parser.add_argument("command", nargs="*", help="`import SRC NAME`")
     args = parser.parse_args(argv)
     os.umask(0o077)
-    cfg = load_config(expand(args.config) if args.config else config_home() / "keys" / "sync.toml")
+    cfg = load_config(expand(args.config))
 
     if args.command:
         if args.command[0] != "import" or len(args.command) != 3:
