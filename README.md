@@ -37,9 +37,13 @@ file and running sync updates the entry. The actual key is never shown.
 
 ## Configuration
 
-`--config PATH` selects the TOML file (default
-`$XDG_CONFIG_HOME/keys/sync.toml`). `keys_dir` selects the source directory
-(default `$XDG_CONFIG_HOME/keys`).
+`--config PATH` selects the TOML file. Without it, `keys-sync` uses
+`~/.agents/keys/sync.toml` if that file exists and
+`$XDG_CONFIG_HOME/keys/sync.toml` otherwise; when both exist it uses the first
+and says so on stderr. `keys_dir` selects the source directory. Without it,
+a configuration file in one of those two directories reads keys from its own
+directory; any other configuration file reads them from the directory chosen
+as above.
 Paths beginning with `~/` resolve using `$HOME`; other relative paths resolve
 against the current directory. If `XDG_CONFIG_HOME` is unset, the default
 configuration directory is `$HOME/.config`.
@@ -73,11 +77,11 @@ Imports refuse to overwrite a different key.
 Only API keys are handled; OAuth credentials are not synced. JSON stores must
 be top-level objects containing entries that are objects; pointers traverse
 object keys, not arrays. pi `models.json` `!cat` file references are checked
-for existence. `--check` is read-only; `--dry-run` does not write. Sync makes
-timestamped mode-600 backups before changing existing stores and writes JSON
-atomically, but does not encrypt keys or manage backup retention. Protect the
-source directory and backups, and inspect your target tool's store format
-before use. A missing p1 route is reported `no-route`, not created.
+for existence. `--check` is read-only; `--dry-run` does not write. Sync writes
+JSON stores atomically with mode 600 and leaves no backup copies, so no old key
+lingers in a `.bak` file; it does not encrypt keys. Protect the source
+directory, and inspect your target tool's store format before use. A missing
+p1 route is reported `no-route`, not created.
 
 ## Tests and local scan
 

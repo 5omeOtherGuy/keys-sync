@@ -107,7 +107,10 @@ p1 = ["route-missing"]
         self.assertEqual((self.home / ".pi/agent/auth.json").read_text(), before)
         self.assertFalse((self.home / ".config/p1/auth.json").exists())
 
-    def test_sync_backup_permissions_rotation_and_import(self):
+    def backups(self):
+        return sorted(str(path.relative_to(self.home)) for path in self.home.rglob("*.bak*"))
+
+    def test_sync_permissions_no_backups_rotation_and_import(self):
         result = self.run_cli()
         self.assertEqual(result.returncode, 0, result.stderr)
         pi = self.get_json(".pi/agent/auth.json")
@@ -117,14 +120,16 @@ p1 = ["route-missing"]
         self.assertEqual(self.get_json(".local/share/opencode/auth.json")["alpha-oc"]["type"], "api")
         path = self.home / ".pi/agent/auth.json"
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-        backups = list(path.parent.glob("auth.json.bak-*"))
-        self.assertEqual(len(backups), 1)
-        self.assertEqual(json.loads(backups[0].read_text())["alpha-pi"]["key"], "old")
+        self.assertEqual(self.backups(), [])  # no copy of the replaced key is left behind
         self.assertEqual(self.run_cli("--check").returncode, 0)
         self.assertNotIn("fixed", self.run_cli().stdout)
-        self.assertEqual(len(list(path.parent.glob("auth.json.bak-*"))), 1)
         self.put_key("alpha", KEY_B)
         self.assertIn("STALE", self.run_cli("--check").stdout)
+        self.assertEqual(self.run_cli().returncode, 0)
+        self.assertEqual(self.get_json(".config/p1/auth.json")["route-a"]["key"], KEY_B)
+        self.assertEqual(self.backups(), [])
+        self.put_key("alpha", KEY_A)
+        self.run_cli()
         self.assertEqual(self.run_cli("import", "pi:alpha-pi", "copied").returncode, 0)
         self.assertEqual((self.keys / "copied.key").read_text().strip(), KEY_A)
         self.assertNotEqual(self.run_cli("import", "pi:alpha-pi", "../escape").returncode, 0)
@@ -162,6 +167,28 @@ targets = { other = ["account"] }
         self.assertEqual(self.run_cli("import", "other:account", "copy").returncode, 0)
         self.configure('[[key]]\nname = "alpha"\ntargets = { missing = ["x"] }\n')
         self.assertIn("unknown JSON store", self.run_cli("--check").stderr)
+
+    def test_agents_keys_store_is_preferred_and_stores_never_mix(self):
+        agents = self.home / ".agents/keys"
+        agents.mkdir(parents=True)
+        (agents / "alpha.key").write_text(KEY_B + "\n")
+        (agents / "sync.toml").write_text('[[key]]\nname = "alpha"\npi = ["alpha-pi"]\n')
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("is ignored", result.stderr)
+        self.assertEqual(self.get_json(".pi/agent/auth.json")["alpha-pi"]["key"], KEY_B)
+        self.assertFalse((self.home / ".local/share/opencode/auth.json").exists())
+        # an explicit XDG config reads the XDG keys, not the preferred store's
+        self.assertEqual(self.run_cli("--config", str(self.keys / "sync.toml")).returncode, 0)
+        self.assertEqual(self.get_json(".pi/agent/auth.json")["alpha-pi"]["key"], KEY_A)
+        # a config elsewhere without keys_dir reads the preferred store
+        other = Path(self.tmp.name) / "other.toml"
+        other.write_text('[[key]]\nname = "alpha"\npi = ["alpha-pi"]\n')
+        self.assertIn("STALE", self.run_cli("--check", "--config", str(other)).stdout)
+        (agents / "sync.toml").unlink()
+        fallback = self.run_cli("--check")
+        self.assertNotIn("is ignored", fallback.stderr)
+        self.assertRegex(fallback.stdout, r"pi:alpha-pi\s+ok")
 
     def test_p1_named_config_dirs_and_multiple_stores(self):
         config_dir = Path(self.tmp.name) / "routes"

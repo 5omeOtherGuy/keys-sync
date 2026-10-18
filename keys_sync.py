@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """keys-sync — copy API keys from local files into configured credential stores.
 
-Canonical store: ``$XDG_CONFIG_HOME/keys/<name>.key`` (one key per file, mode 600),
-mapping ``$XDG_CONFIG_HOME/keys/sync.toml``. JSON targets are configurable; pi and
-opencode have built-in defaults. Optional p1 routes use `p1 login` (key on stdin).
+Canonical store: ``<keys>/<name>.key`` (one key per file, mode 600), mapping ``<keys>/sync.toml``,
+where ``<keys>`` is ``~/.agents/keys`` when it holds a sync.toml and ``$XDG_CONFIG_HOME/keys``
+otherwise. JSON targets are configurable; pi and opencode have built-in defaults. Optional p1
+routes use `p1 login` (key on stdin).
 
 Commands:
   keys-sync --check            report ok / STALE / MISSING / no-route per target; exit 1 if anything is stale
-  keys-sync [--dry-run]        make every target match its key file (backs up each store it changes)
+  keys-sync [--dry-run]        make every target match its key file (atomic writes, no backup copies)
   keys-sync import SRC NAME    copy one existing store entry into the keys directory
                                SRC = STORE:ENTRY | p1-<store>:ROUTE
 
@@ -21,11 +22,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,6 +50,17 @@ def expand(path: str) -> Path:
 
 def config_home() -> Path:
     return Path(os.environ["XDG_CONFIG_HOME"]) if os.environ.get("XDG_CONFIG_HOME") else home() / ".config"
+
+
+def key_stores() -> tuple[Path, Path]:
+    """The two default key stores, in order of preference."""
+    return home() / ".agents" / "keys", config_home() / "keys"
+
+
+def keys_home() -> Path:
+    """The default key store: ~/.agents/keys when it holds a sync.toml, else $XDG_CONFIG_HOME/keys."""
+    agents, xdg = key_stores()
+    return agents if (agents / "sync.toml").is_file() else xdg
 
 
 def read_key(path: Path) -> str:
@@ -102,7 +112,10 @@ class Config:
 
 def load_config(path: Path) -> Config:
     raw = tomllib.loads(path.read_text())
-    keys_dir = expand(raw["keys_dir"]) if "keys_dir" in raw else config_home() / "keys"
+    if "keys_dir" in raw:
+        keys_dir = expand(raw["keys_dir"])
+    else:  # a sync.toml inside one of the default stores reads keys from that store, never the other
+        keys_dir = path.parent if path.parent in key_stores() else keys_home()
     p1 = raw.get("p1", {})
     p1_bin = expand(p1["bin"]) if "bin" in p1 else None
     stores = []
@@ -187,24 +200,6 @@ def write_json_atomic(path: Path, data: dict) -> None:
         raise
 
 
-class Backups:
-    """Back up each store file once per run, before its first change."""
-
-    def __init__(self, dry_run: bool):
-        self.stamp = time.strftime("%Y%m%d-%H%M%S")
-        self.done: set[Path] = set()
-        self.dry_run = dry_run
-
-    def before_change(self, path: Path) -> None:
-        if path in self.done or self.dry_run or not path.exists():
-            self.done.add(path)
-            return
-        backup = path.with_name(f"{path.name}.bak-{self.stamp}")
-        shutil.copy2(path, backup)
-        os.chmod(backup, 0o600)
-        self.done.add(path)
-
-
 def p1_env(store: P1Store, config_dir: Path | None) -> dict:
     env = dict(os.environ)
     env["XDG_CONFIG_HOME"] = str(store.config_home)
@@ -268,7 +263,6 @@ def set_entry(store: dict, entry: str, pointer: tuple[str, ...], kind: str, valu
 def run(cfg: Config, mode: str) -> list[Row]:
     """mode: 'check' | 'dry-run' | 'sync'."""
     rows: list[Row] = []
-    backups = Backups(dry_run=(mode != "sync"))
     json_data = {name: load_json(path) for name, (path, _, _) in cfg.json_stores.items()}
     json_dirty: set[str] = set()
 
@@ -315,7 +309,6 @@ def run(cfg: Config, mode: str) -> list[Row]:
                 elif mode == "dry-run":
                     rows.append(Row(spec.name, target, f"would-fix ({status.lower()})"))
                 else:
-                    backups.before_change(store.auth_path)
                     result = subprocess.run(
                         [str(cfg.p1_bin), "login", route],
                         input=value + "\n",
@@ -328,7 +321,6 @@ def run(cfg: Config, mode: str) -> list[Row]:
                     rows.append(Row(spec.name, target, "fixed" if ok else "FAILED"))
 
     for store in sorted(json_dirty):
-        backups.before_change(cfg.json_stores[store][0])
         write_json_atomic(cfg.json_stores[store][0], json_data[store])
     return rows
 
@@ -398,13 +390,22 @@ def import_entry(cfg: Config, source: str, name: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="keys-sync", description=__doc__.split("\n\n")[0])
-    parser.add_argument("--config", help="TOML mapping (default: $XDG_CONFIG_HOME/keys/sync.toml)")
+    parser.add_argument(
+        "--config", help="TOML mapping (default: ~/.agents/keys/sync.toml if present, else $XDG_CONFIG_HOME/keys/sync.toml)"
+    )
     parser.add_argument("--check", action="store_true", help="report only; exit 1 if any target is stale")
     parser.add_argument("--dry-run", action="store_true", help="show what a sync would change")
     parser.add_argument("command", nargs="*", help="`import SRC NAME`")
     args = parser.parse_args(argv)
     os.umask(0o077)
-    cfg = load_config(expand(args.config) if args.config else config_home() / "keys" / "sync.toml")
+    if args.config:
+        config = expand(args.config)
+    else:
+        config = keys_home() / "sync.toml"
+        other = key_stores()[1] / "sync.toml"
+        if other != config and other.is_file():
+            print(f"keys-sync: using {config}; {other} is ignored (pass --config to choose)", file=sys.stderr)
+    cfg = load_config(config)
 
     if args.command:
         if args.command[0] != "import" or len(args.command) != 3:
