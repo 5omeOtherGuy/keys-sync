@@ -57,6 +57,11 @@ def key_stores() -> tuple[Path, Path]:
     return home() / ".agents" / "keys", config_home() / "keys"
 
 
+def in_store(config: Path) -> bool:
+    """Is this config file inside one of the default key stores (however the path is spelled)?"""
+    return config.parent.resolve() in {store.resolve() for store in key_stores()}
+
+
 def keys_home() -> Path:
     """The default key store: ~/.agents/keys when it holds a sync.toml, else $XDG_CONFIG_HOME/keys."""
     agents, xdg = key_stores()
@@ -115,7 +120,7 @@ def load_config(path: Path) -> Config:
     if "keys_dir" in raw:
         keys_dir = expand(raw["keys_dir"])
     else:  # a sync.toml inside one of the default stores reads keys from that store, never the other
-        keys_dir = path.parent if path.parent in key_stores() else keys_home()
+        keys_dir = path.parent if in_store(path) else keys_home()
     p1 = raw.get("p1", {})
     p1_bin = expand(p1["bin"]) if "bin" in p1 else None
     stores = []
@@ -403,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         config = keys_home() / "sync.toml"
         other = key_stores()[1] / "sync.toml"
-        if other != config and other.is_file():
+        if other.parent.resolve() != config.parent.resolve() and other.is_file():
             print(f"keys-sync: using {config}; {other} is ignored (pass --config to choose)", file=sys.stderr)
     cfg = load_config(config)
 

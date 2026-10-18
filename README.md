@@ -78,8 +78,8 @@ Only API keys are handled; OAuth credentials are not synced. JSON stores must
 be top-level objects containing entries that are objects; pointers traverse
 object keys, not arrays. pi `models.json` `!cat` file references are checked
 for existence. `--check` is read-only; `--dry-run` does not write. Sync writes
-JSON stores atomically with mode 600 and leaves no backup copies, so no old key
-lingers in a `.bak` file; it does not encrypt keys. Protect the source
+JSON stores atomically with mode 600 and creates no backup copies (backups made
+by older versions are not removed); it does not encrypt keys. Protect the source
 directory, and inspect your target tool's store format before use. A missing
 p1 route is reported `no-route`, not created.
 

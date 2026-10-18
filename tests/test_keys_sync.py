@@ -178,9 +178,14 @@ targets = { other = ["account"] }
         self.assertIn("is ignored", result.stderr)
         self.assertEqual(self.get_json(".pi/agent/auth.json")["alpha-pi"]["key"], KEY_B)
         self.assertFalse((self.home / ".local/share/opencode/auth.json").exists())
-        # an explicit XDG config reads the XDG keys, not the preferred store's
-        self.assertEqual(self.run_cli("--config", str(self.keys / "sync.toml")).returncode, 0)
-        self.assertEqual(self.get_json(".pi/agent/auth.json")["alpha-pi"]["key"], KEY_A)
+        # an explicit XDG config reads the XDG keys, not the preferred store's, however it is spelled
+        (self.home / "linked").symlink_to(self.keys)
+        for config in (self.keys / "sync.toml", self.keys / "../keys/sync.toml",
+                       os.path.relpath(self.keys / "sync.toml"), self.home / "linked/sync.toml"):
+            self.run_cli("--config", str(agents / "sync.toml"))
+            self.assertEqual(self.get_json(".pi/agent/auth.json")["alpha-pi"]["key"], KEY_B)
+            self.assertEqual(self.run_cli("--config", str(config)).returncode, 0, config)
+            self.assertEqual(self.get_json(".pi/agent/auth.json")["alpha-pi"]["key"], KEY_A, config)
         # a config elsewhere without keys_dir reads the preferred store
         other = Path(self.tmp.name) / "other.toml"
         other.write_text('[[key]]\nname = "alpha"\npi = ["alpha-pi"]\n')
