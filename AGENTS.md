@@ -2,7 +2,7 @@
 
 ## Profile
 - Purpose: copy API keys from local key files into the JSON credential stores of agent CLIs (and p1 routes) without printing them
-- Stage: pre-release (repository standard 2026-10-18)
+- Stage: archived (repository standard)
 - Gate: `scripts/gate` (CI job `gate`)
 - Landing: direct to main after a green gate; agents land: yes
 - Release: none; agents release: no
