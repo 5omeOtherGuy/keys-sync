@@ -1,8 +1,10 @@
+Archived 2026-11-20: this repository is retired. Source, branches, tags and existing releases are retained for reference.
+
 # keys-sync
 
 Copies API keys from local key files into the credential stores of your agent CLIs.
 
-Status: pre-release. Others may try it, but nothing is promised yet: configuration, commands and output can change without notice.
+Status: archived. Retained for reference; no further development is planned.
 
 [![gate](https://github.com/5omeOtherGuy/keys-sync/actions/workflows/gate.yml/badge.svg?branch=main)](https://github.com/5omeOtherGuy/keys-sync/actions/workflows/gate.yml)
 [![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
